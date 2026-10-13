@@ -268,9 +268,7 @@
    If server.py is running on this computer, the page finds it by itself.
    Otherwise it stays in demo mode (simulated progress, no real file).
    To use a hosted server, put its address here, e.g. "https://my-server.example.com" */
-let API_URL = "";
-fetch("http://localhost:5000/health").then(r => { if (r.ok) API_URL = "http://localhost:5000"; }).catch(() => {});
-
+let API_URL = "https://linkpour.onrender.com";
 const $ = s => document.querySelector(s);
 const root = document.documentElement;
 const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
