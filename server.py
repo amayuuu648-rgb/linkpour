@@ -1,30 +1,43 @@
-"""
-Linkpour server - runs on YOUR computer so linkpour.html can download real files.
 
-Setup (one time):
-    pip install flask yt-dlp
-    (and install ffmpeg - needed for MP4 merging and MP3)
+import os
+import re
+import shutil
+import tempfile
+import urllib.request
 
-Run:
-    python server.py
-
-Leave this window open, then open linkpour.html from your computer.
-Use it only for videos/audio/photos you own or have permission to save.
-"""
-import os, re, shutil, tempfile, urllib.request
 from flask import Flask, request, send_file, jsonify
 import yt_dlp
 
 app = Flask(__name__)
 
-# the page opens as a local file, so it needs permission to talk to this server
+
+@app.route("/")
+def home():
+    return """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Linkpour</title>
+    </head>
+    <body style="font-family:Arial,sans-serif;text-align:center;padding:50px">
+        <h1>Welcome to Linkpour 🚀</h1>
+        <p>Your backend is running successfully!</p>
+    </body>
+    </html>
+    """
+
+
 @app.after_request
 def cors(resp):
     resp.headers["Access-Control-Allow-Origin"] = "*"
     resp.headers["Access-Control-Expose-Headers"] = "Content-Disposition"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return resp
 
-# format ids used by linkpour.html -> yt-dlp settings
+
 def options(fmt, outdir):
     base = {
         "outtmpl": os.path.join(outdir, "%(title).80s.%(ext)s"),
@@ -32,68 +45,123 @@ def options(fmt, outdir):
         "quiet": True,
         "restrictfilenames": False,
     }
+
     heights = {"v1080": 1080, "v720": 720, "v360": 360}
+
     if fmt in heights:
         h = heights[fmt]
         base.update(
             format=f"bestvideo[height<={h}]+bestaudio/best[height<={h}]/best",
             merge_output_format="mp4",
         )
+
     elif fmt == "a192":
         base.update(
             format="bestaudio/best",
-            postprocessors=[{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+            postprocessors=[{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }],
         )
-    else:  # "img" or anything else: best available
+
+    else:
         base.update(format="best")
+
     return base
 
-# photo pins: grab the page's main image if yt-dlp finds no video
+
 def download_image(url, outdir):
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    html = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "ignore")
-    m = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)', html)
-    if not m:
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0"}
+    )
+
+    with urllib.request.urlopen(req, timeout=20) as response:
+        html = response.read().decode("utf-8", "ignore")
+
+    match = re.search(
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
+        html,
+        re.IGNORECASE,
+    )
+
+    if not match:
         raise RuntimeError("No image found")
-    img_url = m.group(1).replace("&amp;", "&")
+
+    img_url = match.group(1).replace("&amp;", "&")
     path = os.path.join(outdir, "image.jpg")
-    req = urllib.request.Request(img_url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=30) as r, open(path, "wb") as f:
-        shutil.copyfileobj(r, f)
+
+    req = urllib.request.Request(
+        img_url, headers={"User-Agent": "Mozilla/5.0"}
+    )
+
+    with urllib.request.urlopen(req, timeout=30) as response:
+        with open(path, "wb") as file:
+            shutil.copyfileobj(response, file)
+
     return path
+
 
 @app.route("/health")
 def health():
     return jsonify(ok=True)
 
-@app.route("/download")
+
+@app.route("/download", methods=["GET", "OPTIONS"])
 def download():
+    if request.method == "OPTIONS":
+        return "", 204
+
     url = request.args.get("url", "").strip()
     fmt = request.args.get("format", "v720")
+
     if not url.startswith(("http://", "https://")):
         return jsonify(error="Invalid link"), 400
 
+    allowed_formats = {"v1080", "v720", "v360", "a192", "img"}
+    if fmt not in allowed_formats:
+        return jsonify(error="Unsupported format"), 400
+
     outdir = tempfile.mkdtemp(prefix="linkpour_")
+
     try:
         try:
             with yt_dlp.YoutubeDL(options(fmt, outdir)) as ydl:
                 ydl.download([url])
-            files = os.listdir(outdir)
+
+            files = [
+                name for name in os.listdir(outdir)
+                if os.path.isfile(os.path.join(outdir, name))
+            ]
+
             if not files:
                 raise RuntimeError("Nothing downloaded")
+
             path = os.path.join(outdir, files[0])
+
         except Exception:
             if fmt != "img":
                 raise
+
             path = download_image(url, outdir)
-        resp = send_file(path, as_attachment=True, download_name=os.path.basename(path))
-        resp.call_on_close(lambda: shutil.rmtree(outdir, ignore_errors=True))
-        return resp
-    except Exception as e:
+
+        response = send_file(
+            path,
+            as_attachment=True,
+            download_name=os.path.basename(path),
+        )
+
+        response.call_on_close(
+            lambda: shutil.rmtree(outdir, ignore_errors=True)
+        )
+        return response
+
+    except Exception as error:
         shutil.rmtree(outdir, ignore_errors=True)
-        print("Download failed:", e)
+        app.logger.exception("Download failed: %s", error)
+
         return jsonify(error="Could not download that link"), 500
 
+
 if __name__ == "__main__":
-    print("Linkpour server running on http://localhost:5000  (keep this window open)")
-    app.run(host="127.0.0.1", port=5000)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
